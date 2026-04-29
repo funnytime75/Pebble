@@ -64,30 +64,22 @@ impl TantivySearch {
                 Ok(idx) => {
                     schema::register_tokenizers(&idx);
 
-                    // Check if schema needs rebuild: body_text must be stored and
-                    // use the default tokenizer (previously used n-gram which causes bloat).
                     let existing_schema = idx.schema();
-                    let needs_rebuild = match existing_schema.get_field("body_text") {
-                        Ok(f) => {
-                            let entry = existing_schema.get_field_entry(f);
-                            if !entry.is_stored() {
-                                true
-                            } else {
-                                match entry.field_type() {
-                                    tantivy::schema::FieldType::Str(text_opts) => {
-                                        match text_opts.get_indexing_options() {
-                                            Some(idx_opts) => {
-                                                idx_opts.tokenizer() != schema::BODY_TOKENIZER
-                                            }
-                                            None => true,
-                                        }
-                                    }
-                                    _ => true,
-                                }
-                            }
-                        }
-                        Err(_) => true,
+                    let field_uses_tokenizer = |field_name: &str, tokenizer: &str| -> bool {
+                        let Ok(field) = existing_schema.get_field(field_name) else {
+                            return false;
+                        };
+                        let entry = existing_schema.get_field_entry(field);
+                        let tantivy::schema::FieldType::Str(text_opts) = entry.field_type() else {
+                            return false;
+                        };
+                        entry.is_stored()
+                            && text_opts
+                                .get_indexing_options()
+                                .is_some_and(|idx_opts| idx_opts.tokenizer() == tokenizer)
                     };
+                    let needs_rebuild = !field_uses_tokenizer("body_text", schema::BODY_TOKENIZER)
+                        || !field_uses_tokenizer("subject", schema::SUBJECT_TOKENIZER);
 
                     if needs_rebuild {
                         tracing::info!("Search index schema outdated, rebuilding...");
@@ -572,6 +564,58 @@ mod tests {
         let hits = engine.search("Invoice", 10).unwrap();
         assert!(!hits.is_empty(), "expected at least one hit");
         assert_eq!(hits[0].message_id, "msg-1");
+    }
+
+    #[test]
+    fn test_search_by_subject_is_case_insensitive_for_english() {
+        let engine = TantivySearch::open_in_memory().unwrap();
+        let msg = make_test_message(
+            "msg-subject-case",
+            "Invoice from Acme Corp",
+            "Please find the attached statement.",
+            "billing@acme.com",
+        );
+        engine.index_message(&msg, &["inbox".to_string()]).unwrap();
+        engine.commit().unwrap();
+
+        let hits = engine.search("invoice", 10).unwrap();
+        assert!(
+            !hits.is_empty(),
+            "expected lowercase query to find uppercase subject"
+        );
+        assert_eq!(hits[0].message_id, "msg-subject-case");
+    }
+
+    #[test]
+    fn test_advanced_subject_search_is_case_insensitive_for_english() {
+        let engine = TantivySearch::open_in_memory().unwrap();
+        let msg = make_test_message(
+            "msg-advanced-subject-case",
+            "Invoice from Acme Corp",
+            "Please find the attached statement.",
+            "billing@acme.com",
+        );
+        engine.index_message(&msg, &["inbox".to_string()]).unwrap();
+        engine.commit().unwrap();
+
+        let hits = engine
+            .advanced_search(AdvancedSearchParams {
+                text: None,
+                from: None,
+                to: None,
+                subject: Some("invoice"),
+                date_from: None,
+                date_to: None,
+                has_attachment: None,
+                folder_id: None,
+                limit: 10,
+            })
+            .unwrap();
+        assert!(
+            !hits.is_empty(),
+            "expected lowercase subject filter to find uppercase subject"
+        );
+        assert_eq!(hits[0].message_id, "msg-advanced-subject-case");
     }
 
     #[test]

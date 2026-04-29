@@ -2,10 +2,11 @@ use tantivy::schema::{
     DateOptions, Field, IndexRecordOption, Schema, SchemaBuilder, TextFieldIndexing, TextOptions,
     INDEXED, STORED, STRING,
 };
-use tantivy::tokenizer::{NgramTokenizer, TextAnalyzer, Token, TokenStream, Tokenizer};
+use tantivy::tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer, Token, TokenStream, Tokenizer};
 use tantivy::{DateTimePrecision, Index};
 
 const NGRAM_TOKENIZER: &str = "ngram3";
+pub(crate) const SUBJECT_TOKENIZER: &str = "subject_ngram3_lower";
 pub(crate) const BODY_TOKENIZER: &str = "body_cjk";
 
 /// Tokenizer that uses standard word splitting for Latin text and emits
@@ -147,7 +148,14 @@ pub fn build_schema() -> SearchSchema {
 
     let message_id = builder.add_text_field("message_id", STRING | STORED);
 
-    // N-gram tokenizer for short fields where substring matching matters
+    let subject_stored = TextOptions::default()
+        .set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer(SUBJECT_TOKENIZER)
+                .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+        )
+        .set_stored();
+
     let ngram_stored = TextOptions::default()
         .set_indexing_options(
             TextFieldIndexing::default()
@@ -172,7 +180,7 @@ pub fn build_schema() -> SearchSchema {
         )
         .set_stored();
 
-    let subject = builder.add_text_field("subject", ngram_stored.clone());
+    let subject = builder.add_text_field("subject", subject_stored);
     let body_text = builder.add_text_field("body_text", body_stored);
     let from_address = builder.add_text_field("from_address", ngram_stored.clone());
     let from_name = builder.add_text_field("from_name", ngram_stored);
@@ -207,6 +215,11 @@ pub fn build_schema() -> SearchSchema {
 pub fn register_tokenizers(index: &Index) {
     let ngram = TextAnalyzer::builder(NgramTokenizer::new(2, 3, false).unwrap()).build();
     index.tokenizers().register(NGRAM_TOKENIZER, ngram);
+
+    let subject = TextAnalyzer::builder(NgramTokenizer::new(2, 3, false).unwrap())
+        .filter(LowerCaser)
+        .build();
+    index.tokenizers().register(SUBJECT_TOKENIZER, subject);
 
     let body = TextAnalyzer::builder(CjkAwareTokenizer).build();
     index.tokenizers().register(BODY_TOKENIZER, body);
